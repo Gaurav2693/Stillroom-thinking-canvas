@@ -1,0 +1,7 @@
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Black background -->
+  <rect width="16" height="16" fill="#000000"/>
+  
+  <!-- Minimal geometric "G" - box with strategic cuts -->
+  <path d="M4 4V12H12V8H8V7H13V13H3V3H13V6H12V4H4Z" fill="#FFFFFF"/>
+</svg>

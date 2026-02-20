@@ -1,0 +1,10 @@
+<svg width="180" height="180" viewBox="0 0 180 180" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Black background -->
+  <rect width="180" height="180" fill="#000000" rx="32"/>
+  
+  <!-- Premium geometric "G" for high resolution with subtle details -->
+  <path d="M45 45V135H135V90H90V78.75H146.25V146.25H33.75V33.75H146.25V67.5H135V45H45Z" fill="#FFFFFF"/>
+  
+  <!-- Optional: Add subtle green accent line for premium feel -->
+  <rect x="90" y="82.5" width="3" height="11.25" fill="#4ade80" opacity="0.6"/>
+</svg>

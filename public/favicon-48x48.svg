@@ -1,0 +1,7 @@
+<svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Black background -->
+  <rect width="48" height="48" fill="#000000"/>
+  
+  <!-- Refined geometric "G" for 48px with rounded corners -->
+  <path d="M12 12V36H36V24H24V21H39V39H9V9H39V18H36V12H12Z" fill="#FFFFFF"/>
+</svg>
