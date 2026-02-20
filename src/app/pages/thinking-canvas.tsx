@@ -3,7 +3,7 @@ import { motion, AnimatePresence, PanInfo, useMotionValue, useSpring } from 'mot
 import { Maximize2, Minimize2, Square, Copy, Trash2, Circle, Droplet, Zap, Menu, RotateCcw, ArrowLeft, Lightbulb, X, Triangle, ChevronLeft, ChevronRight, Eraser } from 'lucide-react';
 import { useTheme } from '@/app/context/theme-context';
 import { useSound } from '@/app/context/sound-context';
-import { Link } from 'react-router';
+import { useNavigate } from 'react-router';
 import { THINKING_MODELS, type ThinkingModel, type LaneConfig } from '@/app/data/thinking-models';
 import { SketchColorPaletteRedesign } from '@/app/components/sketch-color-palette-redesign';
 import { ThinkingCanvasMobileFloatingUI } from '@/app/components/thinking-canvas-mobile-floating-ui';
@@ -106,6 +106,7 @@ const GRID_SIZE = 10;
 const CARD_SNAP_GRID = 20;
 
 export default function ThinkingCanvas() {
+  const navigate = useNavigate();
   const { theme, toggleTheme } = useTheme();
   const { playClick } = useSound();
   const canvasContainerRef = useRef<HTMLDivElement>(null);
@@ -198,6 +199,7 @@ export default function ThinkingCanvas() {
   // Lane drag state
   const [isDraggingLane, setIsDraggingLane] = useState(false);
   const [laneDragStartPositions, setLaneDragStartPositions] = useState<Record<string, { x: number; y: number }>>({});
+  const clearActionCompletedRef = useRef(false);
 
   // Smooth cursor position with spring physics
   const cursorX = useMotionValue(0);
@@ -215,6 +217,7 @@ export default function ThinkingCanvas() {
   const controlsBorder = theme === 'dark' ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.08)';
   const cardColors = theme === 'dark' ? DARK_CARD_COLORS : CARD_COLORS;
   const strokeColors = theme === 'dark' ? DARK_STROKE_COLORS : STROKE_COLORS;
+  const shouldShowSketchPalette = !isMobile;
 
   // Help tooltip content
   const helpTooltips = [
@@ -418,6 +421,36 @@ export default function ThinkingCanvas() {
     return THINKING_MODELS.find((m) => m.id === activeModelId) || null;
   }, [activeModelId]);
 
+  const pickLeastFilledLane = useCallback((model: ThinkingModel, laneCounts: Record<string, number>): string => {
+    return model.lanes.reduce((best, lane) => {
+      const bestCount = laneCounts[best.id] ?? 0;
+      const laneCount = laneCounts[lane.id] ?? 0;
+      return laneCount < bestCount ? lane : best;
+    }, model.lanes[0]).id;
+  }, []);
+
+  const getAlignedLanePosition = useCallback((
+    lane: LaneConfig,
+    cardSize: { width: number; height: number },
+    laneIndex: number,
+  ) => {
+    const padding = 20;
+    const gap = 16;
+    const usableWidth = Math.max(cardSize.width, lane.width - padding * 2);
+    const usableHeight = Math.max(cardSize.height, lane.height - padding * 2);
+    const columns = Math.max(1, Math.floor((usableWidth + gap) / (cardSize.width + gap)));
+    const rows = Math.max(1, Math.floor((usableHeight + gap) / (cardSize.height + gap)));
+    const capacity = Math.max(1, columns * rows);
+    const slot = laneIndex % capacity;
+    const col = slot % columns;
+    const row = Math.floor(slot / columns);
+
+    return {
+      x: lane.x + padding + col * (cardSize.width + gap),
+      y: lane.y + padding + row * (cardSize.height + gap),
+    };
+  }, []);
+
   // Calculate which lane a card should belong to based on model logic
   const calculateCardAffinity = useCallback((card: Card, model: ThinkingModel): string | null => {
     if (!card.content.trim()) return null;
@@ -484,27 +517,51 @@ export default function ThinkingCanvas() {
     return null;
   }, []);
 
+  const resolveLaneForCard = useCallback((
+    card: Card,
+    model: ThinkingModel,
+    laneCounts: Record<string, number>,
+  ): string => {
+    const affinity = calculateCardAffinity(card, model);
+    const hasLane = affinity && model.lanes.some((lane) => lane.id === affinity);
+    if (hasLane && affinity) {
+      return affinity;
+    }
+    return pickLeastFilledLane(model, laneCounts);
+  }, [calculateCardAffinity, pickLeastFilledLane]);
+
   // Apply lane structure - animate cards to their suggested positions
-  const handleApplyStructure = useCallback(() => {
+  const handleApplyStructure = useCallback((withSound: boolean = true) => {
     const model = getActiveModel();
     if (!model || isStructureApplied) return;
     
-    playClick();
+    if (withSound) {
+      playClick();
+    }
     
     // Save current state for undo
     setOriginalCardsSnapshot([...cards]);
     
-    // Calculate affinities for all cards
+    // Calculate lane assignment for all cards (with fallback for empty/unmatched cards)
     const affinities: Record<string, string> = {};
+    const laneCounts: Record<string, number> = {};
+    model.lanes.forEach((lane) => {
+      laneCounts[lane.id] = 0;
+    });
+
     cards.forEach((card) => {
-      const affinity = calculateCardAffinity(card, model);
-      if (affinity) {
-        affinities[card.id] = affinity;
-      }
+      const laneId = resolveLaneForCard(card, model, laneCounts);
+      affinities[card.id] = laneId;
+      laneCounts[laneId] = (laneCounts[laneId] ?? 0) + 1;
     });
     setCardAffinities(affinities);
     
-    // Animate cards to their target lanes
+    // Deterministically align cards into lane slots
+    const laneCardIndices: Record<string, number> = {};
+    model.lanes.forEach((lane) => {
+      laneCardIndices[lane.id] = 0;
+    });
+
     const newCards = cards.map((card) => {
       const laneId = affinities[card.id];
       if (!laneId) return card;
@@ -512,17 +569,15 @@ export default function ThinkingCanvas() {
       const lane = model.lanes.find((l) => l.id === laneId);
       if (!lane) return card;
       
+      const indexInLane = laneCardIndices[laneId] ?? 0;
+      laneCardIndices[laneId] = indexInLane + 1;
       const cardSize = CARD_SIZES[card.size];
-      
-      // Position card in lane with some randomness
-      const padding = 20;
-      const randomX = lane.x + padding + Math.random() * (lane.width - cardSize.width - padding * 2);
-      const randomY = lane.y + padding + Math.random() * (lane.height - cardSize.height - padding * 2);
+      const target = getAlignedLanePosition(lane, cardSize, indexInLane);
       
       return {
         ...card,
-        x: snapToGrid(randomX, CARD_SNAP_GRID),
-        y: snapToGrid(randomY, CARD_SNAP_GRID),
+        x: snapToGrid(target.x, CARD_SNAP_GRID),
+        y: snapToGrid(target.y, CARD_SNAP_GRID),
       };
     });
     
@@ -531,7 +586,13 @@ export default function ThinkingCanvas() {
     
     // Make lanes solid and persistent
     setActiveLanes([...model.lanes]);
-  }, [cards, activeModelId, isStructureApplied, getActiveModel, calculateCardAffinity, playClick]);
+  }, [cards, isStructureApplied, getActiveModel, resolveLaneForCard, getAlignedLanePosition, playClick]);
+
+  // Automatically align existing cards when a lens is selected
+  useEffect(() => {
+    if (!activeModelId || isStructureApplied) return;
+    handleApplyStructure(false);
+  }, [activeModelId, isStructureApplied, handleApplyStructure]);
 
   // Undo structure application - restore card positions but keep lanes visible
   const handleUndoStructure = useCallback(() => {
@@ -558,6 +619,14 @@ export default function ThinkingCanvas() {
     setCardAffinities({});
     setActiveLanes([]);
   }, [isStructureApplied, originalCardsSnapshot, playClick]);
+
+  const handleSelectModel = useCallback((modelId: string) => {
+    setActiveModelId(modelId);
+    setIsStructureApplied(false);
+    setOriginalCardsSnapshot([]);
+    setCardAffinities({});
+    setActiveLanes([]);
+  }, []);
 
   // Handle geometric shape placement
   const handleCanvasClickForShape = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
@@ -946,16 +1015,60 @@ export default function ThinkingCanvas() {
     const size: CardSize = 'medium';
     const cardSize = CARD_SIZES[size];
 
+    let nextX = snapToGrid(x - cardSize.width / 2, CARD_SNAP_GRID);
+    let nextY = snapToGrid(y - cardSize.height / 2, CARD_SNAP_GRID);
+    let assignedLaneId: string | null = null;
+
+    const model = getActiveModel();
+    if (model) {
+      const laneCounts: Record<string, number> = {};
+      model.lanes.forEach((lane) => {
+        laneCounts[lane.id] = 0;
+      });
+
+      cards.forEach((existingCard) => {
+        const laneId =
+          cardAffinities[existingCard.id] && model.lanes.some((lane) => lane.id === cardAffinities[existingCard.id])
+            ? cardAffinities[existingCard.id]
+            : resolveLaneForCard(existingCard, model, laneCounts);
+        laneCounts[laneId] = (laneCounts[laneId] ?? 0) + 1;
+      });
+
+      assignedLaneId = resolveLaneForCard(
+        {
+          id: cardId,
+          x: nextX,
+          y: nextY,
+          content: '',
+          size,
+          color: cardColors[0].bg,
+        },
+        model,
+        laneCounts,
+      );
+      const targetLane = model.lanes.find((lane) => lane.id === assignedLaneId);
+      if (targetLane) {
+        const target = getAlignedLanePosition(targetLane, cardSize, laneCounts[assignedLaneId] ?? 0);
+        nextX = snapToGrid(target.x, CARD_SNAP_GRID);
+        nextY = snapToGrid(target.y, CARD_SNAP_GRID);
+      }
+    }
+
     const newCard: Card = {
       id: cardId,
-      x: snapToGrid(x - cardSize.width / 2, CARD_SNAP_GRID),
-      y: snapToGrid(y - cardSize.height / 2, CARD_SNAP_GRID),
+      x: nextX,
+      y: nextY,
       content: '',
       size,
       color: cardColors[0].bg,
     };
 
     setCards((prev) => [...prev, newCard]);
+    if (model && assignedLaneId) {
+      setCardAffinities((prev) => ({ ...prev, [cardId]: assignedLaneId as string }));
+      setActiveLanes([...model.lanes]);
+      setIsStructureApplied(true);
+    }
     setActiveCardId(cardId);
     setSelectedCardId(cardId);
     setShowCardControls(true);
@@ -1330,6 +1443,9 @@ export default function ThinkingCanvas() {
 
   // Handle clear with confirmation
   const handleClearStart = () => {
+    if (isClearing) return;
+    clearActionCompletedRef.current = false;
+
     let progress = 0;
     setIsClearing(true);
     setClearProgress(0);
@@ -1356,6 +1472,17 @@ export default function ThinkingCanvas() {
       setConnectingFrom(null);
       setPreviewEnd(null);
       setShowIntro(true);
+      setActiveModelId(null);
+      setIsStructureApplied(false);
+      setOriginalCardsSnapshot([]);
+      setCardAffinities({});
+      setActiveLanes([]);
+      setShowModelsOverlay(false);
+      setShowModelSelector(false);
+      setShowLearningOverlay(false);
+      setSelectedShapeType(null);
+      setSelectedShapeId(null);
+      setShowSketchControls(false);
 
       // Immediately clear both canvases imperatively for instant visual feedback
       const canvas = canvasRef.current;
@@ -1369,10 +1496,16 @@ export default function ThinkingCanvas() {
 
       setIsClearing(false);
       setClearProgress(0);
+      clearActionCompletedRef.current = true;
     }, 1000);
   };
 
   const handleClearEnd = () => {
+    if (clearActionCompletedRef.current) {
+      clearActionCompletedRef.current = false;
+      return;
+    }
+
     if (clearTimerRef.current) {
       clearTimeout(clearTimerRef.current);
       clearTimerRef.current = null;
@@ -1384,6 +1517,15 @@ export default function ThinkingCanvas() {
     setIsClearing(false);
     setClearProgress(0);
   };
+
+  const handleBackNavigation = useCallback(() => {
+    playClick();
+    if (window.history.length > 1) {
+      navigate(-1);
+      return;
+    }
+    navigate('/encyclopedia');
+  }, [navigate, playClick]);
 
   // Click canvas to deselect
   const handleCanvasClick = () => {
@@ -2330,20 +2472,19 @@ export default function ThinkingCanvas() {
           {/* Desktop: Back and Clear Navigation Buttons - Icon only */}
           <div className="absolute right-6 top-6 flex items-center gap-3 z-40">
             {/* Back button - Icon only */}
-            <Link to="/canvas" onClick={() => playClick()}>
-              <motion.button
-                className="w-10 h-10 rounded-lg border flex items-center justify-center"
-                style={{
-                  backgroundColor: theme === 'dark' ? 'rgba(255, 255, 255, 0.95)' : 'rgba(0, 0, 0, 0.95)',
-                  borderColor: theme === 'dark' ? 'rgba(0, 0, 0, 0.1)' : 'rgba(255, 255, 255, 0.1)',
-                }}
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                title="Back to Home"
-              >
-                <ArrowLeft className={`w-[18px] h-[18px] ${theme === 'dark' ? 'text-black' : 'text-white'}`} strokeWidth={2.5} />
-              </motion.button>
-            </Link>
+            <motion.button
+              onClick={handleBackNavigation}
+              className="w-10 h-10 rounded-lg border flex items-center justify-center"
+              style={{
+                backgroundColor: theme === 'dark' ? 'rgba(255, 255, 255, 0.95)' : 'rgba(0, 0, 0, 0.95)',
+                borderColor: theme === 'dark' ? 'rgba(0, 0, 0, 0.1)' : 'rgba(255, 255, 255, 0.1)',
+              }}
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              title="Go back"
+            >
+              <ArrowLeft className={`w-[18px] h-[18px] ${theme === 'dark' ? 'text-black' : 'text-white'}`} strokeWidth={2.5} />
+            </motion.button>
 
             {/* Clear button - Icon only, hold to clear */}
             <button
@@ -2368,6 +2509,11 @@ export default function ThinkingCanvas() {
                 handleClearStart();
               }}
               onTouchEnd={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                handleClearEnd();
+              }}
+              onTouchCancel={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
                 handleClearEnd();
@@ -2427,7 +2573,7 @@ export default function ThinkingCanvas() {
                     {getActiveModel()?.description}
                   </p>
                   <p className={`font-['Cambay',sans-serif] text-[12px] tracking-[0.12px] ${textColor} opacity-40 mt-2`}>
-                    Position cards in the ghost lanes, then apply the structure
+                    Cards auto-align to this lens. Drag to fine-tune when needed.
                   </p>
                 </div>
                 <button
@@ -2720,7 +2866,7 @@ export default function ThinkingCanvas() {
 
       {/* Color Palette - Desktop only (mobile uses floating UI) */}
       <AnimatePresence>
-        {!isMobile && showSketchControls && isSketchModeEnabled && (
+        {shouldShowSketchPalette && (
           <motion.div
             className="absolute left-1/2 -translate-x-1/2 bottom-6 z-30"
             initial={{ y: 100, opacity: 0 }}
@@ -2748,7 +2894,7 @@ export default function ThinkingCanvas() {
             <ThinkingModelsMobileSheet
               onSelectModel={(modelId) => {
                 playClick();
-                setActiveModelId(modelId);
+                handleSelectModel(modelId);
                 setShowModelSelector(false);
               }}
               onClose={() => setShowModelSelector(false)}
@@ -3213,7 +3359,7 @@ export default function ThinkingCanvas() {
                       <button
                         onClick={() => {
                           playClick();
-                          setActiveModelId(model.id);
+                          handleSelectModel(model.id);
                           setShowModelsOverlay(false);
                           setShowLearningOverlay(false);
                         }}
